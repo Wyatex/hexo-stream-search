@@ -1,0 +1,84 @@
+{
+  "name": "hexo-stream-search",
+  "version": "0.0.0",
+  "description": "JSONL 流式增量全文搜索：Hexo 生成端（Node）+ 浏览器 Worker 引擎（流式加载 / 分词 / BM25 / IndexedDB）",
+  "type": "commonjs",
+  "main": "./dist/node/index.cjs",
+  "types": "./dist/node/index.d.cts",
+  "exports": {
+    ".": {
+      "types": "./dist/node/index.d.cts",
+      "default": "./dist/node/index.cjs"
+    },
+    "./worker": "./dist/web/search-worker.js",
+    "./worker.mjs": "./dist/web/search-worker.mjs",
+    "./client": {
+      "types": "./dist/web/client.d.mts",
+      "default": "./dist/web/client.mjs"
+    },
+    "./client.iife.js": "./dist/web/client.iife.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.zh-CN.md"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "pnpm run clean && tsdown",
+    "dev": "tsdown --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke": "node tests/smoke.cjs",
+    "typecheck": "tsc --noEmit",
+    "release": "bumpp",
+    "prepublishOnly": "pnpm run build"
+  },
+  "keywords": [
+    "hexo",
+    "search",
+    "bm25",
+    "jsonl",
+    "streaming",
+    "worker",
+    "indexeddb"
+  ],
+  "license": "MIT",
+  "author": "Wyatex <wyatex@qq.com>",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "homepage": "https://github.com/Wyatex/hexo-stream-search#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Wyatex/hexo-stream-search.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Wyatex/hexo-stream-search/issues"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "bumpp": "^12.3.0",
+    "fake-indexeddb": "^6.2.2",
+    "hexo": "^8.1.2",
+    "hexo-7": "npm:hexo@^7.3.0",
+    "tsdown": "^0.23.1",
+    "typescript": "7.1.0-beta",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  },
+  "peerDependencies": {
+    "hexo": ">=7"
+  },
+  "peerDependenciesMeta": {
+    "hexo": {
+      "optional": true
+    }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "hexo-util"
+    ]
+  }
+}

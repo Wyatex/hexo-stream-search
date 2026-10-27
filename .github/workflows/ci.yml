@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches:
+      - master
+      - main
+
+jobs:
+  # 1. 完整构建、类型检查与测试（Hexo 8 / Hexo 7 / 单元测试）
+  build-and-test:
+    name: Build & Test (Node ${{ matrix.node-version }} with pnpm 11)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24, 26]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm 11
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm typecheck
+
+      - name: Build package (Node CJS + Web IIFE/ESM)
+        run: pnpm run build
+
+      - name: Run full Vitest suite (Hexo 8, Hexo 7 & Unit Tests)
+        run: pnpm test
+
+      - name: Upload build dist artifact
+        if: matrix.node-version == 22
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-artifacts
+          path: dist/
+          retention-days: 1
+
+  # 2. 运行时兼容性矩阵（Node 18 / 20 / 22 / 24 / 26）
+  runtime-compatibility:
+    name: Runtime Compatibility (Node ${{ matrix.node-version }})
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22, 24, 26]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-artifacts
+          path: dist/
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Run runtime smoke test (zero dependencies)
+        run: node tests/smoke.cjs

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>hexo-stream-search 演示</title>
+  <style>
+    :root { --primary: #2563eb; --border: #e2e8f0; --bg: #f8fafc; --text: #1e293b; --muted: #64748b; }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHe", sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 40px 20px; }
+    main { max-width: 780px; margin: 0 auto; }
+    h1 { font-size: 22px; margin: 0 0 6px; }
+    p.hint { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+    .search-box { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 4px 16px rgba(0,0,0,.04); }
+    input[type="search"] { width: 100%; padding: 10px 14px; font-size: 15px; border: 1px solid var(--border); border-radius: 8px; outline: none; }
+    input[type="search"]:focus { border-color: var(--primary); }
+    .progress { margin-top: 14px; height: 6px; background: #eef2f7; border-radius: 999px; overflow: hidden; }
+    .progress > i { display: block; height: 100%; width: 0; background: var(--primary); transition: width .2s; }
+    .status { margin-top: 8px; font-size: 12px; color: var(--muted); }
+    .results { list-style: none; margin: 20px 0 0; padding: 0; }
+    .results li { padding: 14px 0; border-bottom: 1px solid var(--border); }
+    .results a { color: var(--primary); font-size: 16px; text-decoration: none; font-weight: 600; }
+    .results a:hover { text-decoration: underline; }
+    .results .snippet { margin: 6px 0 0; font-size: 13px; color: #475569; line-height: 1.6; }
+    .results .meta { margin-top: 6px; font-size: 12px; color: var(--muted); }
+    mark.search-keyword { background: #fef08a; padding: 0 2px; border-radius: 3px; }
+    .empty { color: var(--muted); font-size: 14px; padding: 24px 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>hexo-stream-search 演示</h1>
+    <p class="hint">流式加载 JSONL 索引，边加载边可搜。需把 <code>search-worker.js</code>、<code>client.iife.js</code> 与 <code>search.jsonl</code> 放在同一目录。</p>
+
+    <div class="search-box">
+      <input id="search" type="search" placeholder="输入关键词，支持标题 / 全文 / #标签 / 技术关键词" autocomplete="off" />
+      <div class="progress"><i id="bar"></i></div>
+      <div class="status" id="status">正在连接文章索引源...</div>
+      <ul class="results" id="results"></ul>
+    </div>
+  </main>
+
+  <script src="./client.iife.js"></script>
+  <script>
+    const input = document.getElementById('search')
+    const bar = document.getElementById('bar')
+    const status = document.getElementById('status')
+    const list = document.getElementById('results')
+
+    const client = HexoStreamSearch.createSearchClient({
+      workerUrl: './search-worker.js',
+      jsonlUrl: './search.jsonl',
+      limit: 20,
+      onProgress: ({ loaded, total, percent }) => {
+        bar.style.width = percent + '%'
+        status.textContent = `正在同步全站索引：已加载 ${loaded}/${total} 篇 (${percent}%)，已加载内容可立即检索`
+      },
+      onSyncComplete: ({ totalDocs, totalTerms, updatedCount, canceledEarly }) => {
+        bar.style.width = '100%'
+        status.textContent = `索引就绪：共 ${totalDocs} 篇 / ${totalTerms} 词项，更新 ${updatedCount} 篇` +
+          (canceledEarly ? '（命中增量缓存，提前断开连接）' : '')
+      },
+      onResults: ({ results, elapsedMs }) => {
+        if (!results.length) {
+          list.innerHTML = '<li class="empty">未找到相关文章</li>'
+          return
+        }
+        list.innerHTML = results.map((item) => `
+          <li>
+            <a href="${item.url}">${item.title}</a>
+            <div class="meta">${item.tags.map((t) => '#' + t).join(' ')} · ${item.categories.join(' / ')} · BM25 ${item.score}</div>
+            <p class="snippet">${item.snippet}</p>
+          </li>
+        `).join('')
+      },
+      onError: (message) => {
+        status.textContent = '同步失败：' + message
+      },
+    })
+
+    client.init()
+    input.addEventListener('input', (event) => client.search(event.target.value))
+  </script>
+</body>
+</html>
