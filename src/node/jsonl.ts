@@ -37,12 +37,17 @@ export function buildJsonlRecords(posts: PostLike[], options: BuildJsonlOptions 
   const list = (posts ?? [])
     .filter((post) => post && post.indexing !== false && post.published !== false)
     .slice()
-    .sort((a, b) => postTimestamp(b) - postTimestamp(a))
+    .sort((a, b) => {
+      const diff = postTimestamp(b) - postTimestamp(a)
+      if (diff !== 0) return diff
+      return (a.path || '').localeCompare(b.path || '')
+    })
 
   const meta: SearchMetaRecord = {
     _type: 'meta',
     total: list.length,
     allIds: list.map((post) => post.path),
+    allM: list.map((post) => postTimestamp(post)),
   }
 
   const records: SearchJsonlRecord[] = [meta]

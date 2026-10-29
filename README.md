@@ -3,7 +3,7 @@
 # 🔍 hexo-stream-search
 
 **Streaming, incremental, zero-dependency full-text search for Hexo 7 & 8.**  
-Powered by **JSONL streaming** + **Fetch Stream** + **Intl.Segmenter** + **BM25** + **IndexedDB**.
+Powered by **JSONL streaming** + **HTTP Range Resumption** + **Deterministic Divergence Detection** + **Intl.Segmenter** + **BM25** + **Multi-Store IndexedDB**.
 
 [![npm version](https://img.shields.io/npm/v/hexo-stream-search?color=3282e6&style=flat-square)](https://www.npmjs.com/package/hexo-stream-search)
 [![CI](https://github.com/Wyatex/hexo-stream-search/actions/workflows/ci.yml/badge.svg)](https://github.com/Wyatex/hexo-stream-search/actions/workflows/ci.yml)
@@ -20,14 +20,16 @@ Powered by **JSONL streaming** + **Fetch Stream** + **Intl.Segmenter** + **BM25*
 
 ## 🌟 Highlights
 
-- ⚡ **Searchable While Downloading**: The JSONL index is parsed line by line — every article becomes searchable the moment it arrives, no need to wait for the whole file.
-- 🔄 **Incremental Sync**: The first line carries the full article ID list. Unchanged articles reuse the local cache (no re-tokenization), deleted articles are purged automatically, and the stream is **cancelled early** once every remaining article is already up to date.
-- 💾 **Instant First Paint**: Articles are cached in IndexedDB, so a returning visitor gets a searchable index immediately while the incremental update streams in the background.
-- 🌐 **Native CJK Tokenization**: Built on V8's `Intl.Segmenter` for precise Chinese/English segmentation, with automatic normalization of technical terms (`C++` → `cpp`, `C#` → `csharp`).
-- 📊 **Field-Aware BM25**: Title, tag, category and body weights are folded into the term frequency, with exact-phrase, prefix-match and full-coverage bonuses on top of the standard BM25 score.
-- 📦 **Zero Runtime Dependencies**: Pure Web APIs (`fetch`, `ReadableStream`, `Intl.Segmenter`, `IndexedDB`). No dictionaries to download, no `natural`-style 100MB install, no native compilation.
+- ⚡ **Searchable While Downloading**: The JSONL index is parsed line by line — every article becomes searchable the moment it arrives, no need to wait for the entire file to download.
+- 🔄 **Incremental Sync & Exact Divergence Detection**: The first line carries full-site ID and timestamp snapshots (`allIds` and `allM`). The client calculates the exact divergence boundary in $O(\text{total})$ time. If all articles are up to date, it triggers a **Line 1 zero-byte early abort**; otherwise, it cancels the stream the moment all changed articles have arrived.
+- 📶 **HTTP Range Resumption**: Interrupted streams resume from the exact byte offset using `Range: bytes=<offset>-` and `If-Range: <etag>`. Survives page refreshes, tab closures, and mobile network handoffs without re-downloading previously processed articles.
+- 💾 **Multi-Store Atomic Persistence**: IndexedDB uses isolated `posts` and `meta` stores committed together in single-transaction atomic batches (`applyBatch`), preventing split-state tearing across page reloads. Returning visitors get an instant searchable index while incremental sync runs quietly in the background.
+- 🛡️ **Resilient State Machine**: Comprehensive handling of HTTP 206 (Range resume), 200 (graceful full fallback with automatic dirty cache eviction — 0 ghost posts), 304 (instant 0-byte cache validation), and 416 (automatic range reset and retry).
+- 🌐 **Native CJK Tokenization**: Built on V8's native `Intl.Segmenter` for precise Chinese/English segmentation, with automatic normalization of technical terms (`C++` → `cpp`, `C#` → `csharp`).
+- 📊 **Field-Aware BM25**: Title, tag, category, and body weights are folded into the term frequency, with exact-phrase, prefix-match, and full-coverage bonuses on top of the standard BM25 score.
+- 📦 **Zero Runtime Dependencies**: Pure Web APIs (`fetch`, `ReadableStream`, `Intl.Segmenter`, `IndexedDB`). No dictionaries to download, no heavy natural-language libraries, no native compilation.
 - 🧩 **Cleanly Split Build Outputs**: `dist/node` (Hexo build side) and `dist/web` (browser runtime side) are fully isolated — no browser code leaks into the Node bundle and vice versa.
-- 🧪 **Tested Against Real Hexo**: Full integration suites run against **Hexo 7.3.0** and **Hexo 8.1.2**, plus a zero-dependency runtime smoke test across **Node 18 → 26**.
+- 🧪 **Battle-Tested & Verified**: 206 unit, integration, and end-to-end resilience stress tests across **Hexo 7.3.0** and **Hexo 8.1.2**, plus a zero-dependency runtime smoke test across **Node 18 → 26**.
 
 ---
 
@@ -38,19 +40,23 @@ Powered by **JSONL streaming** + **Fetch Stream** + **Intl.Segmenter** + **BM25*
 | **Index artifact** | One monolithic `search.json` array | **Streamable `search.jsonl`** (meta header + one article per line) |
 | **Transfer** | Whole file downloaded in one shot | **Fetch Stream, parsed line by line** |
 | **Searchable at** | Only after the entire file is downloaded and parsed | **As soon as the first article arrives** |
-| **Incremental update** | Not possible — no id / timestamp, so every deploy rebuilds and re-downloads everything | **Meta header + `m` timestamp diff; unchanged articles reuse the local cache** |
-| **Local cache** | The whole JSON in `localStorage` (heavy, must be re-parsed on every load) | **Per-article IndexedDB records, indexed the moment they arrive** |
-| **Deleted articles** | Only discovered after re-downloading the entire index | **Purged immediately via the meta header diff** |
+| **HTTP Range resumption** | ❌ Not supported (re-downloads whole file on interruption) | **✅ Supported (`Range` + `If-Range`, resumes from byte offset)** |
+| **Incremental update** | ❌ None — no id / timestamp snapshot, rebuilds & re-downloads everything | **✅ Exact `allM` diffing + Line 1 zero-byte early abort** |
+| **Post sorting determinism** | ❌ Arbitrary / unstable across builds | **✅ Deterministic sort (`updated` desc + `path` tie-breaker)** |
+| **Local cache** | Whole JSON in `localStorage` (heavy, re-parsed every load) | **Multi-store IndexedDB (`posts` + `meta`) with atomic batch commits** |
+| **Deleted articles** | Only discovered after re-downloading entire index | **Purged immediately at Line 1 via meta header diff** |
+| **State recovery on reload** | Re-downloads full file | **Resumes from persisted `byteOffset` via HTTP 206** |
+| **Fallback resilience** | Fails completely on transfer interruption | **Resilient state machine (206 / 200 / 304 / 416) + MemoryStore fallback** |
 | **Matching** | Query split into keywords, substring AND-match | **Tokenized BM25 relevance scoring** |
 | **CJK support** | None — Chinese only matches contiguous substrings | **Native `Intl.Segmenter` Chinese/English segmentation** |
-| **Ranking** | Hit / inclusion count (weakly related to real relevance) | **BM25 + title/tag/category weights + phrase, prefix and full-coverage bonuses** |
+| **Ranking** | Hit / inclusion count (weakly related to real relevance) | **BM25 + title/tag/category weights + phrase, prefix, and full-coverage bonuses** |
 | **Result snippets** | Title highlight only, no surrounding context | **Context-aware snippet around the hit, with `<mark>` highlighting** |
-| **Where search runs** | Main thread (blocks the UI on large corpora) | **Web Worker (never blocks the main thread)** |
-| **Pages support** | `field: post / page / all` | Posts only (pages are not indexed yet) |
+| **Where search runs** | Main thread (blocks UI on large blogs) | **Web Worker (never blocks the main thread)** |
+| **Pages support** | `field: post / page / all` | Posts only (pages are scheduled on the roadmap) |
 | **Config block** | `search.path / field / content / format` | `search.path / worker` (`field` accepted for compatibility) |
-| **Theme integration** | Requires the theme's bundled `local-search.js` | **Same protocol, plus a DOM-agnostic client** |
-| **Runtime dependencies** | `hexo-util` + `nunjucks` | **Zero** |
-| **TypeScript types** | None | **Full declarations for both bundles** |
+| **Theme integration** | Requires theme's bundled `local-search.js` | **Same protocol, plus a DOM-agnostic client** |
+| **Runtime dependencies** | `hexo-util` + `nunjucks` | **Zero runtime dependencies** |
+| **TypeScript types** | None | **Full declarations for both Node and Web bundles** |
 | **Hexo 7 & 8** | Not tested against both | **Integration-tested on Hexo 7.3 & 8.1, plus a CI matrix** |
 
 > [!NOTE]
@@ -62,22 +68,51 @@ Powered by **JSONL streaming** + **Fetch Stream** + **Intl.Segmenter** + **BM25*
 
 ```mermaid
 flowchart TD
-    A["Hexo Init: hexo-stream-search"] --> B["Generator: search_jsonl"]
-    A --> C["Generator: search_worker"]
-    B --> D["public/search.jsonl<br/>line 1: meta header, then one article per line"]
-    C --> E["public/search-worker.js<br/>copied from dist/web"]
-    D --> F["Browser: fetch() + ReadableStream"]
-    E --> F
-    F --> G{"First line = meta?"}
-    G -- Yes --> H["Diff allIds vs IndexedDB cache<br/>purge deleted, locate last missing"]
-    G -- No --> I["Tokenize + weighted TF (title/tag/cat/content)"]
-    H --> I
-    I --> J["Add to inverted index → searchable now"]
-    J --> K{"Passed the last missing article?"}
-    K -- Yes --> L["reader.cancel() → release connection"]
-    K -- No --> F
-    L --> M["Persist to IndexedDB"]
-    M --> N["Client receives search_results"]
+    subgraph Build["Hexo Build Phase (Node.js)"]
+        A["Hexo Init: hexo-stream-search"] --> B["Generator: search_jsonl"]
+        A --> C["Generator: search_worker"]
+        B --> D["Deterministic Sorting<br/>(updated desc + post.path tie-breaker)"]
+        D --> E["public/search.jsonl<br/>Line 1: Meta { total, allIds, allM }<br/>Lines 2..N: JSONL Post records"]
+        C --> F["public/search-worker.js<br/>(copied from dist/web)"]
+    end
+
+    subgraph Runtime["Browser Client & Web Worker"]
+        G["Client / Worker Init"] --> H["Load IndexedDB Cache<br/>(posts & meta stores)"]
+        H --> I{"Cached syncState exists?"}
+        I -- "byteOffset > 0 & status: syncing" --> J["Send HTTP Range Request<br/>Range: bytes=offset-<br/>If-Range: etag / lastModified"]
+        I -- "status: completed" --> K["Send Conditional Request<br/>If-None-Match: etag"]
+        I -- "No cache" --> L["Send Full Request (from byte 0)"]
+
+        J --> M{"Response Status"}
+        K --> M
+        L --> M
+
+        M -- "304 Not Modified" --> N["0 Bytes Transferred<br/>Instant Cache Complete"]
+        M -- "416 Range Not Satisfiable" --> O["Discard offset<br/>Retry Full Fetch (byte 0)"]
+        O --> M
+        M -- "200 OK (Full Fetch / Fallback)" --> P["Evict dirty partial cache<br/>Parse Line 1 Meta"]
+        M -- "206 Partial Content (Range Resume)" --> Q["Restore Meta from syncState<br/>Resume from byte offset"]
+
+        P --> R["Compute lastDivergentIndex<br/>from allM & local cache"]
+        R --> S{"lastDivergentIndex === -1?"}
+        S -- Yes --> T["Line 1 Zero-Byte Abort<br/>reader.cancel() → Done"]
+        S -- No --> U["Stream Post Lines"]
+
+        Q --> U
+        U --> V["Uint8Array 0x0A Scan<br/>Strict Line-Boundary Alignment"]
+        V --> W["Tokenize + Weighted TF<br/>(title / tag / category / content)"]
+        W --> X["Insert into Inverted Index<br/>(Instantly Searchable)"]
+        X --> Y{"currentIndex > lastDivergentIndex?"}
+        Y -- Yes --> Z["reader.cancel() Early Disconnect"]
+        Y -- No --> AA{"More stream chunks?"}
+        AA -- Yes --> U
+        AA -- No (Natural EOF) --> AB["Natural EOF Completion"]
+
+        Z --> AC["Multi-Store Atomic Commit<br/>applyBatch('posts' + 'meta')"]
+        AB --> AC
+        T --> AC
+        AC --> AD["Ready for Search Queries"]
+    end
 ```
 
 ---
@@ -98,7 +133,7 @@ yarn add -D hexo-stream-search
 ```
 
 > [!TIP]
-> Hexo automatically loads any plugin matching the `hexo-*` naming convention. No manual registration in `_config.yml` is required!
+> Hexo automatically discovers and activates any plugin matching the `hexo-*` naming convention. No manual registration in `_config.yml` is required!
 
 ---
 
@@ -126,26 +161,35 @@ The theme reads the index URL from `CONFIG.path` (NexT exposes it as `url_for(co
 
 ## 📄 Index Format (`search.jsonl`)
 
-The first line is a global meta header, every following line is one article:
+The first line is a global meta header, and every subsequent line is an individual article record:
 
 ```jsonc
-{"_type":"meta","total":186,"allIds":["a/","b/"]}
-{"id":"a/","t":"标题","u":"/a/","m":1793027367870,"g":["标签"],"k":["分类"],"c":"纯文本正文"}
+{"_type":"meta","total":186,"allIds":["posts/docker/","posts/k8s/"],"allM":[1793027367870,1793026000000]}
+{"id":"posts/docker/","t":"Docker 架构与实战","u":"/posts/docker/","m":1793027367870,"g":["DevOps"],"k":["云原生"],"c":"容器化编排与微服务治理深入剖析..."}
 ```
+
+### Meta Record Fields (Line 1)
 
 | Field | Type | Description |
 |:---|:---:|:---|
-| `_type` | `'meta'` | Marks the meta header (first line only). |
-| `total` | `number` | Total number of published, indexable articles. |
-| `allIds` | `string[]` | All valid article IDs, in the same order as the data lines. |
+| `_type` | `'meta'` | Identifies the meta header (first line only). |
+| `total` | `number` | Total number of published, indexable articles on the site. |
+| `allIds` | `string[]` | Complete array of article IDs in deterministic sort order. |
+| `allM` | `number[]` | Full-site modification timestamps in exact 1-to-1 index correspondence with `allIds`. Enables $O(\text{total})$ exact divergence detection and Line 1 zero-byte early abort. |
+
+### Post Record Fields (Lines 2..N)
+
+| Field | Type | Description |
+|:---|:---:|:---|
 | `id` | `string` | Unique primary key (Hexo's `post.path`). |
 | `t` | `string` | Cleaned plain-text title. |
 | `u` | `string` | Absolute site URL of the article. |
-| `m` | `number` | Modification timestamp in milliseconds — used for the incremental diff. |
-| `g` / `k` | `string[]` | Tags / categories. |
+| `m` | `number` | Modification timestamp in milliseconds — used for incremental cache diffing. |
+| `g` / `k` | `string[]` | Tags (`g`) and categories (`k`). |
 | `c` | `string` | Plain-text body (HTML stripped, entities decoded, whitespace collapsed). |
 
-Articles are sorted by modification time **descending**; drafts and articles with `indexing: false` are excluded.
+> [!IMPORTANT]
+> Articles are sorted deterministically by modification timestamp **descending**, with `post.path` as an unambiguous tie-breaker. Drafts and posts with `indexing: false` are excluded at build time.
 
 ---
 
@@ -160,8 +204,9 @@ Articles are sorted by modification time **descending**; drafts and articles wit
 
   worker.onmessage = (event) => {
     const { type, payload } = event.data
-    if (type === 'progress') console.log(`已加载 ${payload.loaded}/${payload.total}`)
-    if (type === 'sync_complete') console.log('索引就绪', payload)
+    if (type === 'cache_ready') console.log(`Instant cache ready with ${payload.count} articles`)
+    if (type === 'progress') console.log(`Loaded ${payload.loaded}/${payload.total} (${payload.percent}%)`)
+    if (type === 'sync_complete') console.log('Index fully synced', payload)
     if (type === 'search_results') console.log(payload.results)
   }
 
@@ -169,9 +214,9 @@ Articles are sorted by modification time **descending**; drafts and articles wit
 </script>
 ```
 
-### 2. DOM-agnostic Client (recommended)
+### 2. DOM-Agnostic Client (Recommended)
 
-The packaged client handles input debouncing, `requestId` race conditions, auto re-search during streaming and worker lifecycle for you:
+The bundled client handles input debouncing, `requestId` race resolution, automatic re-searching during streaming, and worker lifecycle management:
 
 ```js
 import { createSearchClient } from 'hexo-stream-search/client'
@@ -180,8 +225,10 @@ const client = createSearchClient({
   workerUrl: '/search-worker.js',
   jsonlUrl: '/search.jsonl',
   limit: 20,
+  debounceMs: 90,
+  autoRefreshWhileSyncing: true,
   onProgress: ({ loaded, total }) => renderProgress(loaded, total),
-  onSyncComplete: ({ totalDocs }) => console.log(`${totalDocs} articles indexed`),
+  onSyncComplete: ({ totalDocs, resumed }) => console.log(`${totalDocs} articles ready (resumed: ${resumed})`),
   onResults: ({ results, elapsedMs }) => renderResults(results, elapsedMs),
   onError: (message) => console.error(message),
 })
@@ -190,72 +237,73 @@ client.init()
 input.addEventListener('input', (event) => client.search(event.target.value))
 ```
 
-For plain `<script>` tags use the IIFE build, which exposes the global `HexoStreamSearch`:
+For plain `<script>` tags, include the IIFE build which exposes the global `HexoStreamSearch`:
 
 ```html
 <script src="/search-client.iife.js"></script>
 <script>
   const client = HexoStreamSearch.createSearchClient({ workerUrl: '/search-worker.js' })
+  client.init()
 </script>
 ```
 
-### 3. Ready-made Demo
+### 3. Ready-Made Demo
 
-`examples/demo.html` in this repository is a self-contained demo page — copy `search-worker.js`, `client.iife.js` and `search.jsonl` next to it and open it in a browser.
+`examples/demo.html` in this repository is a self-contained demo page — copy `search-worker.js`, `client.iife.js`, and `search.jsonl` next to it and open it directly in a browser.
 
 ---
 
 ## 🔌 Message Protocol
 
-### Main thread → Worker
+### Main Thread → Worker
 
 | Command | Payload | Description |
 |:---|:---|:---|
 | `INIT` | `{ url?: string }` | Start syncing (defaults to `/search.jsonl`). |
-| `SEARCH` | `{ query: string, limit?: number, requestId: number }` | Run a search. |
-| `CLEAR` | — | Drop the IndexedDB cache. |
+| `SEARCH` | `{ query: string, limit?: number, requestId: number }` | Execute a search query. |
+| `CLEAR` | — | Drop the IndexedDB cache and reset state. |
 
-### Worker → Main thread
+### Worker → Main Thread
 
 | Event | Payload | Description |
 |:---|:---|:---|
-| `cache_ready` | `{ count, totalTerms }` | Cached articles were indexed — search is available immediately. |
-| `progress` | `{ loaded, total, percent, updated, scanned }` | Streaming progress (throttled every 40ms). |
-| `sync_complete` | `{ totalDocs, totalTerms, updatedCount, deletedCount, scannedLines, canceledEarly, elapsedMs }` | Sync finished. |
-| `search_results` | `{ query, requestId, results, elapsedMs }` | Search results. |
-| `cleared` | `true` | Cache cleared. |
-| `error` | `string` | Error message. |
+| `cache_ready` | `{ count, totalTerms }` | Cached articles restored from IndexedDB — search is available immediately. |
+| `progress` | `{ loaded, total, percent, updated, scanned }` | Streaming progress (throttled at 40ms intervals). |
+| `sync_complete` | `{ totalDocs, totalTerms, updatedCount, deletedCount, scannedLines, canceledEarly, elapsedMs, resumed }` | Sync finished. `resumed` indicates Range 206 or 304 hit. |
+| `search_results` | `{ query, requestId, results, elapsedMs }` | Search results ordered by BM25 relevance score. |
+| `cleared` | `true` | Cache successfully dropped. |
+| `error` | `string` | Error description. |
 
 ---
 
 ## 🔬 Ranking Model
 
-The engine scores documents with **BM25** and then applies field-aware bonuses.
+The search engine scores documents using **BM25** and applies field-aware bonuses:
 
-### 1. Inverse Document Frequency
+### 1. Inverse Document Frequency (IDF)
 $$\text{IDF}(w) = \ln\left(1 + \frac{N - DF(w) + 0.5}{DF(w) + 0.5}\right)$$
 
 ### 2. Term Saturation & Length Normalization
 $$\text{TF}_{\text{BM25}}(w, D) = \frac{\text{freq}(w, D) \cdot (k_1 + 1)}{\text{freq}(w, D) + k_1 \cdot \left(1 - b + b \cdot \frac{|D|}{\text{avgdl}}\right)}$$
 *Standard constants: $k_1 = 1.5$, $b = 0.75$.*
 
-### 3. Field Weights & Bonuses
+### 3. Field Weights & Scoring Signals
 
 | Signal | Value |
 |:---|:---:|
 | Field weights (folded into term frequency) | title **4.0** / tag **3.0** / category **2.5** / content **1.0** |
-| Title contains the full query | **+8.0** (another **+4.0** when the title *starts* with it) |
+| Title contains the full query | **+8.0** (additional **+4.0** when title *starts* with it) |
 | Body contains the exact phrase | **+4.0** |
-| All query terms matched | **×1.6** (plus a coordination factor of $0.5 + 0.5 \cdot coverage$) |
-| English prefix fallback (e.g. `types` → `typescript`) | automatic |
+| All query terms matched | **×1.6** (plus coordination factor $0.5 + 0.5 \cdot \text{coverage}$) |
+| English prefix fallback (e.g. `types` → `typescript`) | Automatic |
 
-High-frequency Chinese stop words are filtered out for multi-word queries, and every highlight is HTML-escaped before being wrapped in `<mark class="search-keyword">`.
+High-frequency Chinese and English stop words are filtered out for multi-word queries, and every snippet highlight is safely HTML-escaped before being wrapped in `<mark class="search-keyword">`.
 
 ---
 
 ## 🛠️ Programmatic API
 
-### Node side
+### Node Side
 
 ```typescript
 import { buildJsonl, cleanText, registerGenerators } from 'hexo-stream-search'
@@ -274,16 +322,15 @@ const jsonl = buildJsonl(
   ],
   { root: '/' },
 )
-// jsonl → {"_type":"meta","total":1,"allIds":["posts/docker-k8s/"]}\n{"id":"posts/docker-k8s/", ...}
 
-// Strip HTML / decode entities
+// Strip HTML / decode HTML entities
 cleanText('<p>Hello&nbsp;&amp;&nbsp;World</p>') // → 'Hello&nbsp; World'
 
-// Register the generators manually (auto-registered when loaded by Hexo)
+// Register generators manually (automatically registered when loaded by Hexo)
 registerGenerators(hexo)
 ```
 
-### Web side
+### Web Side
 
 ```typescript
 import { createSearchClient } from 'hexo-stream-search/client'
@@ -291,8 +338,8 @@ import { createSearchClient } from 'hexo-stream-search/client'
 const client = createSearchClient({
   workerUrl: '/search-worker.js',
   jsonlUrl: '/search.jsonl',
-  debounceMs: 90,                 // input debounce
-  autoRefreshWhileSyncing: true,  // re-search while the index is still streaming
+  debounceMs: 90,
+  autoRefreshWhileSyncing: true,
   onResults: ({ results }) => console.log(results),
 })
 
@@ -304,91 +351,78 @@ client.destroy()
 
 ---
 
-## 🧪 Testing
+## 🧪 Testing & Verification
 
-The suite runs with [Vitest](https://vitest.dev/) and covers:
+The project is thoroughly tested using [Vitest](https://vitest.dev/) with **15 test suites and 206 test cases**:
 
-- HTML cleaning, entity decoding and whitespace collapsing
-- `Intl.Segmenter` tokenization, technical-term normalization and the no-Segmenter fallback
-- BM25 scoring, field weights, phrase bonuses and prefix fallback
-- JSONL streaming: partial lines, meta header diffing, early `reader.cancel()`, deleted-article cleanup
-- IndexedDB persistence, upgrade and the in-memory degradation path
-- Worker protocol payloads and the client-side debounce / race handling
-- Real **Hexo 7.3.0** and **Hexo 8.1.2** integration lifecycles
-- A zero-dependency runtime smoke test against the built `dist`
+- HTML cleaning, entity decoding, and whitespace collapsing.
+- `Intl.Segmenter` tokenization, technical-term normalization, and regex fallback.
+- BM25 scoring, field weights, exact phrase bonuses, and prefix matching.
+- JSONL streaming: partial lines, byte-boundary alignment (`0x0A`), meta diffing, early abort, and deleted post cleanup.
+- HTTP Range 206 resumption, ETag/If-Range validation, and interrupted stream recovery across multiple refresh cycles.
+- Resilient state machine: HTTP 200 fallback with dirty cache eviction, 416 retry, and 304 instant finish.
+- IndexedDB multi-store architecture (`posts` and `meta`), single-transaction atomic batching (`applyBatch`), and in-memory degradation.
+- Client debouncing, `requestId` race condition handling, and worker protocol contracts.
+- Real **Hexo 7.3.0** and **Hexo 8.1.2** full lifecycle integration tests.
+- Zero-dependency runtime smoke tests across **Node 18 → 26**.
 
 ```bash
-# Run all unit + integration tests
+# Run all unit, integration, and stress tests
 pnpm test
 
-# Type check
+# Run TypeScript type check
 pnpm typecheck
 
-# Build the Node and web bundles
+# Build both Node and Web production bundles
 pnpm build
 
-# Smoke test the built artifacts
+# Run runtime smoke test on built artifacts
 pnpm smoke
 ```
 
-### CI & Release
+### CI & Release Automation
 
-- `.github/workflows/ci.yml`
-  - `build-and-test` — type check → build → full test suite on **Node 22 / 24 / 26**, then uploads the `dist` artifact.
-  - `runtime-compatibility` — downloads the artifact and runs `tests/smoke.cjs` on **Node 18 / 20 / 22 / 24 / 26**.
-- `.github/workflows/release.yml` — pushing a `v*` tag builds, tests, publishes to npm with `--provenance` and creates a GitHub Release with the `dist` files.
+- `.github/workflows/ci.yml`:
+  - `build-and-test`: Type check → build → full test suite on **Node 22 / 24 / 26**, uploading the `dist` artifact.
+  - `runtime-compatibility`: Runs `tests/smoke.cjs` across **Node 18 / 20 / 22 / 24 / 26**.
+- `.github/workflows/release.yml`: Pushing a `v*` tag triggers build, test, npm publish with `--provenance`, and GitHub Release generation.
 
 ---
 
-## 🛡️ Graceful Degradation
+## 🛡️ Graceful Degradation Matrix
 
-| Scenario | Behaviour |
+The engine is engineered to handle real-world network turbulence, legacy environments, and restricted browser sandbox modes gracefully:
+
+| Scenario / Failure Mode | Fallback Behaviour & Recovery Strategy |
 |:---|:---|
-| Browser without `Intl.Segmenter` (e.g. Safari < 16.4) | Falls back to a regex tokenizer (CJK bigrams). Results stay usable, precision drops slightly. |
-| IndexedDB unavailable (private mode, disabled storage) | Falls back to an in-memory cache — identical behaviour, no cross-session persistence. |
-| Stream interrupted mid-way | The in-memory index built so far is kept and remains searchable. The next visit re-streams the file from the beginning, but cached articles are **not** re-tokenized and the connection is cancelled right after the last missing article — so only the changed part is transferred again. |
-| Worker bundle missing at build time | The `search_worker` generator is skipped with a warning instead of failing the build. |
-
----
-
-<a id="known-issue"></a>
-
-## ⚠️ Known Issue: A Changed Article Can Be Skipped by the Early Disconnect
-
-**Symptom** — After an article's content changes, the search index may keep serving the **old** content for that article, and the staleness persists across reloads.
-
-**Root cause** — The early-disconnect logic only tracks articles that are *missing* from the local cache (`lastMissingIndex`). An article that **is** cached but whose `m` has changed does **not** advance that marker, so the stream can be cancelled before the client ever reaches it:
-
-```
-file order (by updated desc):  [B unchanged] [A m changed] [C unchanged]
-                               ^ cancel here → A is never re-indexed
-```
-
-**Why it rarely happens** — Editing an article updates its `updated` timestamp to "now", which moves it to the **head** of the file, i.e. before the disconnect point. The bug only surfaces when the timestamp is pinned to an older date in the front-matter (`updated: 2024-01-01`) or when two articles share the exact same `updated` value and the sort order flips between builds.
-
-**Impact** — Low probability, but the stale entry is self-perpetuating: every following sync cancels at the same position.
-
-**Workaround** — Let Hexo manage the timestamp (omit `updated:` from the front-matter). The article then moves to the head of the index and is always re-indexed.
-
-**Planned fix** — Carry a `{ id, m }` snapshot of the first N articles in the meta header so the client can compute the *exact* first divergent position instead of guessing it. See the roadmap below.
-
----
+| **Server lacks HTTP Range support** | Server returns `200 OK` instead of `206 Partial Content`. The client detects the full response, automatically evicts any uncompleted partial cache from previous interrupted sessions to prevent ghost posts, resets `byteOffset` to 0, and safely ingests the full stream. |
+| **Server ETag / Last-Modified changed** | If the remote index is updated while a resume request is in flight, `If-Range` validation fails and the server serves `200 OK`. The client discards outdated partial cache and streams the new index cleanly from byte 0. |
+| **HTTP 416 Range Not Satisfiable** | Occurs if the remote index shrinks or the cached byte offset is invalidated. The client catches the 416 status, immediately resets `byteOffset` to 0, and automatically retries a full fetch. |
+| **HTTP 304 Not Modified** | When the index has not changed since the last completed sync, the server responds with 304. The client completes immediately with 0 bytes transferred, serving the existing IndexedDB index instantly. |
+| **IndexedDB unavailable** (private browsing, storage quotas, disabled storage) | Transparently falls back to `MemoryStore`. Search and streaming work identically in memory for the active session, with persistence safely bypassed. |
+| **Legacy JSONL without `allM`** | Safely falls back to `allIds` missing-ID diffing mode (`lastMissingIndex`), ensuring 100% backward compatibility with index files generated by earlier plugin versions. |
+| **Browser lacks `Intl.Segmenter`** (e.g. Safari < 16.4) | Automatically falls back to a regex CJK bigram tokenizer. Search remains functional with a minor drop in segmentation granularity. |
+| **Worker bundle missing at build time** | The `search_worker` generator logs a warning and gracefully skips rather than crashing the Hexo site build. |
 
 ## 🗺️ Roadmap
 
-- [ ] **HTTP Range resume for the index file** — send `Range: bytes=<offset>-` (with `If-Range` / `ETag`) so an interrupted sync continues from the last received byte instead of re-streaming the file from the beginning. Needs: the `ETag` / `Last-Modified` of the index exposed to the client, the last received offset persisted in IndexedDB, and a graceful fallback to today's full-stream behaviour when the server does not support byte ranges.
-- [ ] **Exact divergence detection** — ship a `{ id, m }` head snapshot in the meta header so the disconnect point is computed precisely, closing the [known issue](#known-issue) above.
-- [ ] **Index pages as well as posts** — `hexo-generator-searchdb` can index `locals.pages` via `search.field: page | all`; this package currently indexes posts only.
+- [x] **HTTP Range resume for the index file** — Resumes interrupted index downloads from the last committed byte offset using `Range: bytes=<offset>-` and `If-Range` validation. *(Built-in)*
+- [x] **Exact divergence detection (`allM` snapshot)** — Transmits full-site timestamp snapshot in Line 1 meta header to compute exact divergence points and enable Line 1 zero-byte abort. *(Built-in)*
+- [ ] **Index pages as well as posts** — Support indexing `locals.pages` via `search.field: page | all` (matching `hexo-generator-searchdb` parity).
+- [ ] **Pre-tokenized index option** — Optional build-time tokenization mode for ultra-low-power devices.
 
 ---
 
 ## 🔄 Migration from `hexo-generator-searchdb`
 
-1. Remove `hexo-generator-searchdb` from your dependencies — it registers its own generator against the same `search` config block, so both would fight over the same output file.
-2. Add this package: `"hexo-stream-search": "file:../path/to/hexo-stream-search"` (or the published version).
-3. Delete any hand-written `scripts/jsonl-generator.js` and `search-worker.js`.
-4. Point the theme at the new index — NexT reads it from `CONFIG.path`, which is derived from `search.path` (`search.jsonl` by default).
-5. Your theme script can keep using the original protocol, or switch to `hexo-stream-search/client` to reuse the debounce and auto re-search logic.
+1. Remove `hexo-generator-searchdb` from your `package.json` dependencies — both plugins hook into the same `search` configuration block and would contest the output path.
+2. Install this package:
+   ```bash
+   npm install hexo-stream-search --save-dev
+   ```
+3. Remove any custom `scripts/jsonl-generator.js` or `search-worker.js` legacy scripts.
+4. Verify your theme configuration points to the index URL (NexT reads `CONFIG.path`, which is derived from `search.path`, defaulting to `search.jsonl`).
+5. Your theme's existing search script will continue to work, or you can switch to `hexo-stream-search/client` to take advantage of automatic debouncing and background streaming refresh.
 
 ---
 

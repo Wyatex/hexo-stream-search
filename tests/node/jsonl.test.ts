@@ -49,13 +49,27 @@ describe('normalizePostUrl', () => {
 })
 
 describe('buildJsonlRecords', () => {
-  it('第一行为元数据且按更新时间降序', () => {
+  it('第一行为元数据且按更新时间降序并包含 allM', () => {
     const records = buildJsonlRecords(posts)
     expect(records[0]).toEqual({
       _type: 'meta',
       total: 2,
       allIds: ['b/', 'a/'],
+      allM: [200, 100],
     })
+  })
+
+  it('时间戳相同时使用 path 作为次级排序键保证确定性排序', () => {
+    const sameTimePosts: PostLike[] = [
+      { path: 'zeta/', title: 'Z', updated: 500 },
+      { path: 'alpha/', title: 'A', updated: 500 },
+      { path: 'beta/', title: 'B', updated: 500 },
+      { path: 'newer/', title: 'N', updated: 600 },
+    ]
+    const records = buildJsonlRecords(sameTimePosts)
+    const meta = records[0] as { allIds: string[]; allM: number[] }
+    expect(meta.allIds).toEqual(['newer/', 'alpha/', 'beta/', 'zeta/'])
+    expect(meta.allM).toEqual([600, 500, 500, 500])
   })
 
   it('过滤 indexing=false 与 published=false 的文章', () => {
@@ -91,7 +105,7 @@ describe('buildJsonlRecords', () => {
 
   it('空文章集合只输出元数据', () => {
     const records = buildJsonlRecords([])
-    expect(records).toEqual([{ _type: 'meta', total: 0, allIds: [] }])
+    expect(records).toEqual([{ _type: 'meta', total: 0, allIds: [], allM: [] }])
   })
 })
 

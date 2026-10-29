@@ -10,6 +10,11 @@ export interface SearchMetaRecord {
   total: number
   /** 所有有效文章的 ID 集合（顺序与数据行一致，按更新时间降序） */
   allIds: string[]
+  /**
+   * 全站文章修改时间戳列表（与 allIds 严格下标一一对应）。
+   * 用于客户端 O(total) 计算确切差异，杜绝提前断流漏更。
+   */
+  allM?: number[]
 }
 
 /**
@@ -69,6 +74,35 @@ export interface CacheReadyPayload {
   totalTerms: number
 }
 
+/**
+ * 索引同步持久化状态（存储在 meta 仓库中，用于 HTTP Range 断点续传与协商缓存）
+ */
+export interface IndexSyncState {
+  /** 唯一主键，例如 `sync_state:/search.jsonl` */
+  key: string
+  /** 关联的索引资源 URL */
+  url: string
+  /** 当前已安全提交到 IndexedDB 的最大字节偏移量（严格对齐完整行末尾 \n 之后） */
+  byteOffset: number
+  /** 服务端响应头 ETag */
+  etag?: string
+  /** 服务端响应头 Last-Modified */
+  lastModified?: string
+  /** 同步状态：'syncing' 表示中途中断待续传，'completed' 表示全站同步已完结 */
+  status: 'syncing' | 'completed'
+  /** 兼容字段：status === 'completed' */
+  completed?: boolean
+  /** 解析到的 Meta 头部数据（206 续传时复用） */
+  meta?: SearchMetaRecord
+  /** 已扫描文章计数 */
+  scannedCount?: number
+  /** 最后更新时间戳（毫秒） */
+  updatedAt: number
+}
+
+/** 兼容别名 */
+export type SyncState = IndexSyncState
+
 /** 同步完成 */
 export interface SyncCompletePayload {
   totalDocs: number
@@ -78,6 +112,8 @@ export interface SyncCompletePayload {
   scannedLines: number
   canceledEarly: boolean
   elapsedMs: number
+  /** 本次是否命中断点续传（206）或协商缓存（304） */
+  resumed?: boolean
 }
 
 /** 检索结果 */

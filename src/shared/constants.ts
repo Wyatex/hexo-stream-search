@@ -45,10 +45,19 @@ export const STOP_WORDS: ReadonlySet<string> = new Set([
 export const DB_NAME = 'HexoBlogSearchDB'
 
 /** IndexedDB 版本 */
-export const DB_VERSION = 2
+export const DB_VERSION = 1
 
-/** IndexedDB objectStore 名 */
+/** IndexedDB 文章 objectStore 名 */
 export const STORE_NAME = 'posts'
+
+/** IndexedDB 元数据与断点状态 objectStore 名 */
+export const META_STORE_NAME = 'meta'
+
+/** 分批持久化默认文档批次大小 */
+export const DEFAULT_BATCH_SIZE = 50
+
+/** 分批持久化默认刷新最大时间间隔（毫秒） */
+export const DEFAULT_BATCH_INTERVAL_MS = 500
 
 /** 默认的索引文件路径 */
 export const DEFAULT_SEARCH_PATH = 'search.jsonl'

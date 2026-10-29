@@ -48,6 +48,8 @@ export function createEngine(options: EngineOptions): SearchEngine {
 
   const handleInit = async (url?: string): Promise<void> => {
     const startTime = now()
+    const targetUrl = url || '/search.jsonl'
+    const syncKey = targetUrl.startsWith('sync_state:') ? targetUrl : `sync_state:${targetUrl}`
 
     try {
       store = await createPostStore({
@@ -58,6 +60,7 @@ export function createEngine(options: EngineOptions): SearchEngine {
       })
 
       const localMap = await store.getAll()
+      const syncState = await store.getSyncState(syncKey)
 
       // 本地有缓存，立即构建索引实现首屏秒搜
       if (localMap.size > 0) {
@@ -71,10 +74,14 @@ export function createEngine(options: EngineOptions): SearchEngine {
         })
       }
 
-      // 后台流式拉取增量更新
+      // 后台流式拉取增量更新（支持 Range 续传与周期分批提交）
       const stats = await syncJsonlStream({
-        url: url || '/search.jsonl',
+        url: targetUrl,
         localMap,
+        syncState,
+        onBatchCommit: async (batch) => {
+          await store?.applyBatch(batch.toPut, batch.toDelete, batch.syncState)
+        },
         handlers: {
           onDocument(doc, kind) {
             if (kind === 'new') {
@@ -95,9 +102,6 @@ export function createEngine(options: EngineOptions): SearchEngine {
         now,
       })
 
-      // 持久化变更数据到 IndexedDB
-      await store.apply(stats.toPut, stats.toDelete)
-
       // 若有改动或首次加载，重新构建倒排索引
       if (stats.toPut.length > 0 || stats.toDelete.length > 0 || index.size === 0) {
         index.buildFrom(localMap.values())
@@ -113,6 +117,7 @@ export function createEngine(options: EngineOptions): SearchEngine {
           scannedLines: stats.scannedCount,
           canceledEarly: stats.canceledEarly,
           elapsedMs: Math.round(now() - startTime),
+          resumed: stats.resumed,
         },
       })
     } catch (error) {
