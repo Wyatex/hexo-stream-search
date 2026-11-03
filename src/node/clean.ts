@@ -19,7 +19,7 @@ const HTML_ENTITY_MAP: Readonly<Record<string, string>> = {
   '&#x3D;': '=',
 }
 
-const ENTITY_PATTERN = /&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g
+const ENTITY_PATTERN = /&(\#[xX][0-9a-fA-F]+|\#\d+|[a-zA-Z][a-zA-Z0-9]*);/g
 
 function fromCodePoint(code: number, fallback: string): string {
   if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return fallback

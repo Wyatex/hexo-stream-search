@@ -1,4 +1,13 @@
+/**
+ * 倒排索引与 BM25 检索引擎：字段加权词频、倒排表维护与多维相关性打分
+ */
 import { describe, expect, it } from 'vitest'
+import {
+  CATEGORY_WEIGHT,
+  CONTENT_WEIGHT,
+  TAG_WEIGHT,
+  TITLE_WEIGHT,
+} from '../../src/shared/constants'
 import { IndexStore, processPost } from '../../src/web/core/index-store'
 import type { SearchPostRecord } from '../../src/shared/types'
 
@@ -15,114 +24,189 @@ function post(overrides: Partial<SearchPostRecord> & { id: string }): SearchPost
 }
 
 describe('processPost', () => {
-  it('按字段权重统计加权词频', () => {
-    const doc = processPost(post({ id: 'a', t: 'typescript', c: 'typescript' }))
-    // 标题 4.0 + 正文 1.0
-    expect(doc.tf.typescript).toBeCloseTo(5)
-    expect(doc.dl).toBeCloseTo(5)
+  it('按标题 / 标签 / 分类 / 正文权重累加词频并计算有效文档长度 dl', () => {
+    const doc = processPost(
+      post({
+        id: 'a/',
+        t: 'typescript',
+        g: ['typescript'],
+        k: ['typescript'],
+        c: 'typescript',
+      }),
+    )
+    const expected = TITLE_WEIGHT + TAG_WEIGHT + CATEGORY_WEIGHT + CONTENT_WEIGHT
+    expect(doc.tf.typescript).toBeCloseTo(expected)
+    expect(doc.dl).toBeCloseTo(expected)
   })
 
-  it('标签与分类拥有独立权重', () => {
-    const doc = processPost(post({ id: 'a', g: ['ts'], k: ['前端'] }))
-    expect(doc.tf.ts).toBeCloseTo(3)
-    expect(doc.tf.前端).toBeCloseTo(2.5)
+  it('缺失可选字段时使用安全默认值，且词频表基于无原型对象防止原型链污染', () => {
+    const doc = processPost({
+      id: 'proto/',
+      t: 'constructor toString valueOf',
+      u: '',
+      m: 0,
+      g: undefined as never,
+      k: undefined as never,
+      c: '',
+    })
+
+    expect(doc.u).toBe('proto/')
+    expect(doc.g).toEqual([])
+    expect(doc.k).toEqual([])
+    expect(Object.getPrototypeOf(doc.tf)).toBeNull()
+    expect(doc.tf.constructor).toBe(TITLE_WEIGHT)
+    expect(doc.tf.tostring).toBe(TITLE_WEIGHT)
   })
 })
 
 describe('IndexStore', () => {
-  it('维护文档数与词项数', () => {
-    const store = new IndexStore()
-    store.addPost(processPost(post({ id: 'a', t: 'alpha' })))
-    store.addPost(processPost(post({ id: 'b', t: 'beta' })))
-    expect(store.size).toBe(2)
-    expect(store.termCount).toBe(2)
+  describe('文档与倒排表增删改', () => {
+    it('维护文档字典与词项计数，移除或清空时释放无引用的倒排链表', () => {
+      const store = new IndexStore()
+      store.addPost(processPost(post({ id: 'a/', t: 'alpha shared' })))
+      store.addPost(processPost(post({ id: 'b/', t: 'beta shared' })))
+
+      expect(store.size).toBe(2)
+      expect(store.termCount).toBe(3)
+      expect(store.has('a/')).toBe(true)
+      expect(store.getDoc('a/')?.id).toBe('a/')
+
+      store.removePost('a/')
+      expect(store.size).toBe(1)
+      expect(store.has('a/')).toBe(false)
+      // 'alpha' 倒排表为空被移除，仅剩 'beta' 与 'shared'
+      expect(store.termCount).toBe(2)
+
+      // 移除不存在的 ID 或写入空对象安全无副作用
+      store.removePost('non-existent/')
+      store.addPost({ id: '' } as never)
+      expect(store.size).toBe(1)
+
+      store.clear()
+      expect(store.size).toBe(0)
+      expect(store.termCount).toBe(0)
+    })
+
+    it('覆盖更新同一 ID 文档时先清除旧词项，避免残留脏命中', () => {
+      const store = new IndexStore()
+      store.addPost(processPost(post({ id: 'a/', t: 'legacyword', c: 'old body' })))
+      store.addPost(processPost(post({ id: 'a/', t: 'modernword', c: 'new body' })))
+
+      expect(store.size).toBe(1)
+      expect(store.search('legacyword')).toEqual([])
+      expect(store.search('modernword')[0]?.id).toBe('a/')
+    })
+
+    it('buildFrom 重建全量索引并清空此前数据', () => {
+      const store = new IndexStore()
+      store.addPost(processPost(post({ id: 'stale/', t: 'stale' })))
+
+      store.buildFrom([
+        processPost(post({ id: 'p1/', t: 'rust' })),
+        processPost(post({ id: 'p2/', t: 'golang' })),
+      ])
+
+      expect(store.size).toBe(2)
+      expect(store.has('stale/')).toBe(false)
+      expect(store.search('rust')[0]?.id).toBe('p1/')
+    })
   })
 
-  it('移除文档时同步清理倒排索引', () => {
-    const store = new IndexStore()
-    store.addPost(processPost(post({ id: 'a', t: 'alpha' })))
-    store.removePost('a')
-    expect(store.size).toBe(0)
-    expect(store.termCount).toBe(0)
-  })
+  describe('BM25 相关性排序与结构化加成', () => {
+    it('按字段权重排序：标题命中 > 标签命中 > 分类命中 > 正文命中', () => {
+      const store = new IndexStore()
+      store.buildFrom([
+        processPost(post({ id: 'body/', t: '无关标题', c: '这里提到了算法复杂度' })),
+        processPost(post({ id: 'category/', t: '无关标题', k: ['算法'], c: '普通正文' })),
+        processPost(post({ id: 'tag/', t: '无关标题', g: ['算法'], c: '普通正文' })),
+        processPost(post({ id: 'title/', t: '算法指南', c: '普通正文' })),
+      ])
 
-  it('重复加入同一文档不会重复计数', () => {
-    const store = new IndexStore()
-    store.addPost(processPost(post({ id: 'a', t: 'alpha' })))
-    store.addPost(processPost(post({ id: 'a', t: 'alpha' })))
-    expect(store.size).toBe(1)
-  })
+      const ids = store.search('算法').map((r) => r.id)
+      expect(ids).toEqual(['title/', 'tag/', 'category/', 'body/'])
+    })
 
-  it('标题命中排在正文命中之前', () => {
-    const store = new IndexStore()
-    store.addPost(
-      processPost(post({ id: 'title-hit', t: 'typescript', c: '无关内容' })),
-    )
-    store.addPost(
-      processPost(post({ id: 'content-hit', t: '其他文章', c: '这里提到 typescript 一次' })),
-    )
+    it('标题前缀匹配得分高于标题中间包含匹配', () => {
+      const store = new IndexStore()
+      store.buildFrom([
+        processPost(post({ id: 'middle/', t: '深入理解 Hexo 插件机制' })),
+        processPost(post({ id: 'prefix/', t: 'Hexo 插件机制深入理解' })),
+      ])
 
-    const results = store.search('typescript')
-    expect(results[0].id).toBe('title-hit')
-  })
+      const results = store.search('hexo')
+      expect(results[0].id).toBe('prefix/')
+      expect(results[0].score).toBeGreaterThan(results[1].score)
+    })
 
-  it('标签命中也能检索到文章', () => {
-    const store = new IndexStore()
-    store.addPost(processPost(post({ id: 'tagged', g: ['typescript'] })))
-    const results = store.search('typescript')
-    expect(results.map((item) => item.id)).toContain('tagged')
-  })
+    it('正文包含完整检索短语的文档高于词项分散出现的文档', () => {
+      const store = new IndexStore()
+      store.buildFrom([
+        processPost(post({ id: 'scattered/', t: 'Note A', c: 'stream processing and later full search index' })),
+        processPost(post({ id: 'phrase/', t: 'Note B', c: 'building a fast stream search engine in browser' })),
+      ])
 
-  it('支持英文短词前缀回退命中', () => {
-    const store = new IndexStore()
-    store.addPost(processPost(post({ id: 'a', t: 'typescript' })))
-    const results = store.search('types')
-    expect(results.map((item) => item.id)).toContain('a')
-  })
+      const results = store.search('stream search')
+      expect(results[0].id).toBe('phrase/')
+    })
 
-  it('返回结果字段完整且分数保留两位小数', () => {
-    const store = new IndexStore()
-    store.addPost(
-      processPost(post({ id: 'a', t: 'TypeScript 入门', u: 'a/', g: ['ts'], k: ['前端'], c: 'typescript 基础' })),
-    )
+    it('多词查询赋予全词覆盖协同加成，且自动剔除泛停用词', () => {
+      const store = new IndexStore()
+      store.buildFrom([
+        processPost(post({ id: 'partial/', t: 'stream', c: 'stream only' })),
+        processPost(post({ id: 'both/', t: 'stream worker', c: 'stream worker' })),
+      ])
 
-    const [result] = store.search('typescript')
-    expect(result).toBeDefined()
-    expect(result.id).toBe('a')
-    expect(result.url).toBe('/a/')
-    expect(result.tags).toEqual(['ts'])
-    expect(result.categories).toEqual(['前端'])
-    expect(result.updated).toBe(1)
-    expect(Number.isInteger(result.score * 100)).toBe(true)
-    expect(result.title).toContain('<mark class="search-keyword">')
-    expect(result.snippet).toContain('typescript')
-  })
+      expect(store.search('stream worker')[0].id).toBe('both/')
+      // 含停用词 "的" 时不应因缺失 "的" 而拉低全实词命中的文档排名
+      expect(store.search('stream 的 worker')[0].id).toBe('both/')
+    })
 
-  it('空查询返回空结果', () => {
-    const store = new IndexStore()
-    store.addPost(processPost(post({ id: 'a', t: 'alpha' })))
-    expect(store.search('')).toEqual([])
-    expect(store.search('   ')).toEqual([])
-  })
+    it('英文技术词支持 2 字符以上前缀回退匹配，单字符不触发误匹配', () => {
+      const store = new IndexStore()
+      store.addPost(processPost(post({ id: 'ts/', t: 'typescript compiler' })))
 
-  it('空索引时返回空结果', () => {
-    expect(new IndexStore().search('anything')).toEqual([])
-  })
+      expect(store.search('types').map((r) => r.id)).toEqual(['ts/'])
+      expect(store.search('t')).toEqual([])
+    })
 
-  it('命中全部查询词的文档获得更高权重', () => {
-    const store = new IndexStore()
-    store.addPost(processPost(post({ id: 'both', t: 'stream worker', c: 'stream worker' })))
-    store.addPost(processPost(post({ id: 'partial', t: 'stream', c: 'stream' })))
+    it('输出规范化 URL、两位小数得分、高亮标题与摘要，并遵守 limit 上限', () => {
+      const store = new IndexStore()
+      for (let i = 0; i < 5; i++) {
+        store.addPost(
+          processPost(
+            post({
+              id: `p${i}`,
+              t: `TypeScript 第 ${i} 篇`,
+              u: `posts/p${i}/`, // 故意不带前导斜杠
+              m: 100 + i,
+              g: ['ts'],
+              k: ['前端'],
+              c: 'typescript 类型体操与编译器原理',
+            }),
+          ),
+        )
+      }
 
-    const results = store.search('stream worker')
-    expect(results[0].id).toBe('both')
-  })
+      const hits = store.search('typescript', 2)
+      expect(hits).toHaveLength(2)
+      expect(hits[0]).toMatchObject({
+        url: expect.stringMatching(/^\/posts\/p\d\/$/),
+        tags: ['ts'],
+        categories: ['前端'],
+      })
+      expect(Number.isInteger(Math.round(hits[0].score * 100))).toBe(true)
+      expect(hits[0].title).toContain('<mark class="search-keyword">TypeScript</mark>')
+      expect(hits[0].snippet).toContain('<mark class="search-keyword">typescript</mark>')
+    })
 
-  it('限制返回数量', () => {
-    const store = new IndexStore()
-    for (let i = 0; i < 5; i++) {
-      store.addPost(processPost(post({ id: `p${i}`, t: 'typescript' })))
-    }
-    expect(store.search('typescript', 2)).toHaveLength(2)
+    it('空查询、纯标点查询或空索引返回空数组', () => {
+      const empty = new IndexStore()
+      expect(empty.search('hexo')).toEqual([])
+
+      empty.addPost(processPost(post({ id: 'a/', t: 'hexo' })))
+      expect(empty.search('')).toEqual([])
+      expect(empty.search('   ')).toEqual([])
+      expect(empty.search('... !!!')).toEqual([])
+    })
   })
 })
