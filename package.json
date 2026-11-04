@@ -1,6 +1,6 @@
 {
   "name": "hexo-stream-search",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "JSONL 流式增量全文搜索：Hexo 生成端（Node）+ 浏览器 Worker 引擎（流式加载 / 分词 / BM25 / IndexedDB）",
   "type": "commonjs",
   "main": "./dist/node/index.cjs",
