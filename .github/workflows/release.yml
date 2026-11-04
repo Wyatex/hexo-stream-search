@@ -5,15 +5,50 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的版本标签，例如 v0.0.1（留空则使用当前 ref）'
+        required: false
+        type: string
+      publish_mode:
+        description: 'direct = 直接发布到 latest；staged = 暂存发布（需 2FA 人工审批后才转正）'
+        required: false
+        default: direct
+        type: choice
+        options:
+          - direct
+          - staged
+      dry_run:
+        description: '仅执行构建与校验，不实际发布到 npm'
+        required: false
+        default: false
+        type: boolean
 
+# 默认最小权限：只有发布任务才需要 id-token: write
 permissions:
-  contents: write
-  id-token: write
+  contents: read
+
+# 同一标签的发布串行执行，避免重复发包
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+  PNPM_VERSION: '11.25.0'
+  NPM_REGISTRY: 'https://registry.npmjs.org'
 
 jobs:
-  release:
-    name: Publish to npm & GitHub Release
+  # 1. 构建、测试与打包（不持有 OIDC 权限，依赖安装阶段无法窃取发布令牌）
+  build:
+    name: Build & Verify
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      package-name: ${{ steps.meta.outputs.name }}
+      package-version: ${{ steps.meta.outputs.version }}
+      release-tag: ${{ steps.meta.outputs.tag }}
+      tarball: ${{ steps.pack.outputs.tarball }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -23,14 +58,13 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11.25.0
+          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -44,15 +78,180 @@ jobs:
       - name: Run tests
         run: pnpm test
 
-      - name: Publish to npm (OIDC Trusted Publishing with Provenance)
-        run: pnpm publish --provenance --access public --no-git-checks
+      - name: Resolve release metadata
+        id: meta
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          tag="${RELEASE_TAG}"
+
+          if [[ "${tag}" != v* ]]; then
+            echo "::error::需要一个版本标签（例如 v0.0.1），当前解析到 '${tag}'。"
+            exit 1
+          fi
+          if [[ "${tag}" != "v${version}" ]]; then
+            echo "::error::标签 ${tag} 与 package.json 版本 ${version} 不一致（期望 v${version}）。请先执行 'pnpm release' 完成 bump 与打标签。"
+            exit 1
+          fi
+
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "::notice::待发布版本：${name}@${version}（标签 ${tag}）"
+
+      - name: Pack tarball
+        id: pack
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          # 打包产物即最终发布物，发布任务无需再次安装依赖或构建
+          npm pack --pack-destination ./artifacts --loglevel warn
+          tarball=$(ls -1 artifacts/*.tgz | head -n 1)
+          echo "tarball=${tarball}" >> "$GITHUB_OUTPUT"
+          echo "::notice::已打包 ${tarball}"
+
+      - name: Upload package tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: artifacts/*.tgz
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload build dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-artifacts
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  # 2. 通过 npm OIDC 信任发布（Trusted Publishing）发包，无需任何长期 NPM_TOKEN
+  publish:
+    name: Publish to npm (OIDC)
+    needs: build
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # npm OIDC 信任发布必需
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download package tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: artifacts/
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: ${{ env.NPM_REGISTRY }}
+          # 发布流程刻意不使用任何缓存，避免缓存投毒窃取 OIDC 令牌
+
+      - name: Upgrade npm CLI (Trusted Publishing 需要 npm >= 11.5.1)
+        run: npm install -g npm@latest
+
+      - name: Fetch npm OIDC token
+        run: |
+          set -euo pipefail
+          token=$(curl -sSf \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" \
+            | jq -r '.value // empty')
+          if [ -z "${token}" ]; then
+            echo "::error::无法从 GitHub Actions OIDC 端点获取 npm 令牌。"
+            exit 1
+          fi
+          echo "::add-mask::${token}"
+          echo "NPM_ID_TOKEN=${token}" >> "$GITHUB_ENV"
+
+      - name: Check whether the version is already published
+        id: published
+        env:
+          PACKAGE_NAME: ${{ needs.build.outputs.package-name }}
+          PACKAGE_VERSION: ${{ needs.build.outputs.package-version }}
+        run: |
+          set -euo pipefail
+          if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${PACKAGE_NAME}@${PACKAGE_VERSION} 已发布到 npm，跳过发包步骤。"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm (OIDC Trusted Publishing)
+        if: steps.published.outputs.exists != 'true'
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
+          PACKAGE_NAME: ${{ needs.build.outputs.package-name }}
+          PACKAGE_VERSION: ${{ needs.build.outputs.package-version }}
+          TARBALL: ${{ needs.build.outputs.tarball }}
+          PUBLISH_MODE: ${{ inputs.publish_mode || 'direct' }}
+        run: |
+          set -uo pipefail
+
+          # 必须传绝对路径：npm-package-arg 会把 "./x.tgz" / "/abs/x.tgz" 识别为本地文件，
+          # 而把 "artifacts/x.tgz" 这类相对路径当成 GitHub 仓库简写（owner/repo）而报 EALLOWGIT。
+          tarball_path="$(realpath "${TARBALL}")" || tarball_path="./${TARBALL}"
+          if [ ! -f "${tarball_path}" ]; then
+            echo "::error::找不到待发布的 tarball：${TARBALL}"
+            exit 1
+          fi
+          echo "::notice::待发布文件：${tarball_path}"
+
+          if [ "${PUBLISH_MODE}" = "staged" ]; then
+            echo "::notice::暂存发布：版本会进入暂存区，需维护者使用 2FA 审批后才会对公众可见。"
+            npm stage publish "${tarball_path}" --provenance
+            exit $?
+          fi
+
+          echo "::notice::正在通过 OIDC 信任发布 ${PACKAGE_NAME}@${PACKAGE_VERSION} 到 npm……"
+          if npm publish "${tarball_path}" --provenance --access public; then
+            exit 0
+          fi
+
+          # 新建的 Trusted Publisher 默认只允许 "npm stage publish"，
+          # 此时回退到暂存发布，避免因 npmjs.com 上的允许动作配置而卡住发版。
+          echo "::warning::直接发布被拒绝，回退为暂存发布（npm stage publish）。"
+          echo "::warning::若期望直接发布到 latest，请在 npmjs.com 的 Trusted Publisher 中允许 “npm publish”。"
+          npm stage publish "${tarball_path}" --provenance
+
+  # 3. 生成 GitHub Release（只需要 contents: write，不持有 OIDC 令牌）
+  github-release:
+    name: GitHub Release
+    needs: [build, publish]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download build dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-artifacts
+          path: dist/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
         with:
+          tag_name: ${{ needs.build.outputs.release-tag }}
           generate_release_notes: true
           files: |
             dist/*

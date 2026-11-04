@@ -385,7 +385,9 @@ pnpm smoke
 - `.github/workflows/ci.yml`:
   - `build-and-test` —— 在 **Node 22 / 24 / 26** 上执行类型检查 → 构建 → 完整测试，并上传 `dist` 产物。
   - `runtime-compatibility` —— 在 **Node 18 / 20 / 22 / 24 / 26** 上运行 `tests/smoke.cjs`。
-- `.github/workflows/release.yml` —— 推送 `v*` 标签时自动构建、测试、以 `--provenance` 发布到 npm，并自动生成附带产物的 GitHub Release。
+- `.github/workflows/release.yml` —— 推送 `v*` 标签时自动构建、测试、打包，并通过 **npm OIDC 信任发布（Trusted Publishing）** 发到 npm（不需要长期 `NPM_TOKEN`，自动附带 provenance 溯源），随后生成附带产物的 GitHub Release。
+  - 首次使用需在 npmjs.com → Packages → `hexo-stream-search` → Settings → Trusted Publisher 中登记：GitHub Actions → `Wyatex/hexo-stream-search` → 工作流文件名 `release.yml`。
+  - 工作流文件名必须与上面登记的完全一致（含 `.yml` 后缀），否则会报 `ENEEDAUTH`。
 
 ---
 

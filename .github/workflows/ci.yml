@@ -13,11 +13,21 @@ on:
       - master
       - main
 
+# CI 只需要读取仓库内容
+permissions:
+  contents: read
+
+# 同一分支的新提交会取消仍在运行的旧任务，避免浪费并发额度
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # 1. 完整构建、类型检查与测试（Hexo 8 / Hexo 7 / 单元测试）
   build-and-test:
     name: Build & Test (Node ${{ matrix.node-version }} with pnpm 11)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +73,7 @@ jobs:
     name: Runtime Compatibility (Node ${{ matrix.node-version }})
     needs: build-and-test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

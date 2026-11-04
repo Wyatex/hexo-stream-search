@@ -385,7 +385,9 @@ pnpm smoke
 - `.github/workflows/ci.yml`:
   - `build-and-test`: Type check → build → full test suite on **Node 22 / 24 / 26**, uploading the `dist` artifact.
   - `runtime-compatibility`: Runs `tests/smoke.cjs` across **Node 18 / 20 / 22 / 24 / 26**.
-- `.github/workflows/release.yml`: Pushing a `v*` tag triggers build, test, npm publish with `--provenance`, and GitHub Release generation.
+- `.github/workflows/release.yml`: Pushing a `v*` tag triggers build, test and pack, then publishes to npm via **npm OIDC trusted publishing** (no long-lived `NPM_TOKEN`, provenance attestations attached automatically), and finally creates a GitHub Release with the built assets.
+  - One-time setup: register a trusted publisher on npmjs.com → Packages → `hexo-stream-search` → Settings → Trusted Publisher → GitHub Actions → `Wyatex/hexo-stream-search` → workflow filename `release.yml`.
+  - The workflow filename must match exactly what you register there (including the `.yml` suffix), otherwise publishing fails with `ENEEDAUTH`.
 
 ---
 
